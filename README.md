@@ -13,7 +13,13 @@ loads it:
 | `plugin_sysinfo_modules`    | `local_probe` | List modules (DLLs) loaded in a given `pid`.                     |
 | `plugin_sysinfo_cpuid`      | `safe`        | Return CPU vendor / brand string / common feature bits.          |
 
-Total plugin source: ~300 lines of C++ with zero external dependencies.
+Total plugin source: ~220 lines of C++. The one build-time dependency is
+[nlohmann/json](https://github.com/nlohmann/json), fetched automatically
+by CMake at configure time — that's what this example uses to build /
+parse the JSON payloads that cross the plugin ABI. The ABI itself is
+JSON-over-C-strings, so any JSON library (or a hand-written writer)
+works — nlohmann is just what the host already uses, so it's the path
+of least resistance.
 
 [rsm]: https://github.com/pinefin/reversal-suite-mcp
 
@@ -151,7 +157,9 @@ swapped out.
 
 ## Build from source
 
-Requires **CMake ≥ 3.20** and a **C++17** toolchain. The release workflow
+Requires **CMake ≥ 3.20**, a **C++17** toolchain, and a working `git`
+(CMake `FetchContent` will clone nlohmann/json v3.11.3 into the build
+tree on first configure — no manual install step). The release workflow
 uses MSVC 2022 (Visual Studio 17); MinGW / clang-cl should work too but
 aren't tested in CI.
 
@@ -396,10 +404,16 @@ undefined behavior on Windows.
   string. `result_json` should be `NULL`. The host surfaces this as
   `isError: true` in the MCP response.
 
-You don't have to depend on nlohmann/json or any other library — small
-plugins can hand-format JSON (see `src/plugin_sysinfo.cpp` for a minimal
-manual writer with proper escaping). Larger plugins should use a real
-parser; the ABI has no opinion.
+This example uses **nlohmann/json** (fetched by CMake at configure time)
+because it's what the host already uses — so the same idioms carry over
+and there's no surprise in the diff. See `src/plugin_sysinfo.cpp` for
+the pattern: build a `nlohmann::json` value, `dump()` it into a string,
+hand it off through `ok_json(...)`.
+
+The ABI has no opinion on which JSON library you use — trivial
+zero-dependency plugins can hand-format JSON with `std::snprintf`; large
+schemas can pull in RapidJSON, simdjson, or whatever fits. Cross the
+boundary as UTF-8 `const char*` and everything downstream just works.
 
 ### Session helpers
 

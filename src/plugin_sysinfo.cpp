@@ -5,16 +5,20 @@
 //   plugin_sysinfo_modules    — list modules loaded by a target pid
 //   plugin_sysinfo_cpuid      — return CPU vendor / brand / features
 //
-// The whole file is a template for third-party plugin authors: it uses only
-// the C ABI from rsm/plugin.h plus Win32 / <intrin.h>. No STL leaks across
-// the ABI boundary.
+// Uses nlohmann/json to build and parse the payloads that cross the
+// plugin ABI boundary. The ABI itself is UTF-8 JSON in a C string — any
+// library (or hand-written writer) works; nlohmann is just what this
+// example picks because it's what the host already uses. Third-party
+// plugins can pick differently.
 
 #include "rsm/plugin.h"
 
+#include <nlohmann/json.hpp>
+
 #include <cstdint>
-#include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <string>
 
 #include <windows.h>
@@ -22,6 +26,8 @@
 #include <intrin.h>
 
 namespace {
+
+using json = nlohmann::json;
 
 // -----------------------------------------------------------------------
 // Owned result — the plugin allocates one blob with host->alloc, packs
@@ -52,9 +58,9 @@ char* dup_str(const std::string& s) {
     return p;
 }
 
-rsm_tool_result ok_json(const std::string& j) {
+rsm_tool_result ok_json(const json& j) {
     auto* o = static_cast<owned_result_t*>(g_host->alloc(sizeof(owned_result_t)));
-    o->result_json   = dup_str(j);
+    o->result_json   = dup_str(j.dump());
     o->error_message = nullptr;
     rsm_tool_result r{};
     r.result_json = o->result_json;
@@ -76,60 +82,16 @@ rsm_tool_result err(int code, const std::string& m) {
 }
 
 // -----------------------------------------------------------------------
-// Minimal JSON writer. Enough for our three tools; no dep on a JSON lib
-// so the plugin stays tiny.
+// UTF-16 → UTF-8 for Win32 strings.
 // -----------------------------------------------------------------------
-
-void json_escape_into(std::string& out, const char* s) {
-    for (const char* p = s; *p; ++p) {
-        unsigned char c = static_cast<unsigned char>(*p);
-        switch (c) {
-            case '\\': out += "\\\\"; break;
-            case '"':  out += "\\\""; break;
-            case '\b': out += "\\b";  break;
-            case '\f': out += "\\f";  break;
-            case '\n': out += "\\n";  break;
-            case '\r': out += "\\r";  break;
-            case '\t': out += "\\t";  break;
-            default:
-                if (c < 0x20) {
-                    char buf[8];
-                    std::snprintf(buf, sizeof(buf), "\\u%04x", c);
-                    out += buf;
-                } else {
-                    out += static_cast<char>(c);
-                }
-        }
-    }
-}
 
 std::string wide_to_utf8(const wchar_t* w) {
     if (!w || !*w) return {};
     int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, nullptr, 0, nullptr, nullptr);
     if (n <= 1) return {};
-    std::string out(static_cast<size_t>(n - 1), '\0');
+    std::string out(static_cast<std::size_t>(n - 1), '\0');
     WideCharToMultiByte(CP_UTF8, 0, w, -1, out.data(), n, nullptr, nullptr);
     return out;
-}
-
-// -----------------------------------------------------------------------
-// Params helpers — we don't parse JSON in the plugin; for `modules` we
-// just look for a `"pid":<integer>` substring. Real plugins should use a
-// proper parser; this file stays dependency-free deliberately.
-// -----------------------------------------------------------------------
-
-bool find_int_param(const char* json, const char* key, int64_t& out) {
-    if (!json || !key) return false;
-    std::string needle = std::string("\"") + key + "\"";
-    const char* p = std::strstr(json, needle.c_str());
-    if (!p) return false;
-    p += needle.size();
-    while (*p == ' ' || *p == '\t' || *p == ':') ++p;
-    char* end = nullptr;
-    long long v = std::strtoll(p, &end, 10);
-    if (end == p) return false;
-    out = v;
-    return true;
 }
 
 // -----------------------------------------------------------------------
@@ -142,31 +104,21 @@ rsm_tool_result t_processes(rsm_session*, const char*, void*) {
         return err(1, "CreateToolhelp32Snapshot failed");
     }
 
-    std::string out = "{\"processes\":[";
+    json procs = json::array();
     PROCESSENTRY32W pe{};
     pe.dwSize = sizeof(pe);
 
-    bool first = true;
     if (Process32FirstW(snap, &pe)) {
         do {
-            if (!first) out += ",";
-            first = false;
-
-            std::string name = wide_to_utf8(pe.szExeFile);
-            char pid_buf[32];
-            std::snprintf(pid_buf, sizeof(pid_buf), "%lu",
-                          static_cast<unsigned long>(pe.th32ProcessID));
-
-            out += "{\"pid\":";
-            out += pid_buf;
-            out += ",\"name\":\"";
-            json_escape_into(out, name.c_str());
-            out += "\"}";
+            procs.push_back({
+                {"pid",  static_cast<std::uint32_t>(pe.th32ProcessID)},
+                {"name", wide_to_utf8(pe.szExeFile)},
+            });
         } while (Process32NextW(snap, &pe));
     }
     CloseHandle(snap);
-    out += "]}";
-    return ok_json(out);
+
+    return ok_json({{"processes", std::move(procs)}});
 }
 
 // -----------------------------------------------------------------------
@@ -174,58 +126,46 @@ rsm_tool_result t_processes(rsm_session*, const char*, void*) {
 // -----------------------------------------------------------------------
 
 rsm_tool_result t_modules(rsm_session*, const char* params, void*) {
-    int64_t pid = 0;
-    if (!find_int_param(params, "pid", pid) || pid <= 0) {
-        return err(2, "missing or invalid `pid` param");
+    json p;
+    try {
+        p = params ? json::parse(params) : json::object();
+    } catch (const std::exception& e) {
+        return err(2, std::string("invalid params JSON: ") + e.what());
+    }
+    if (!p.contains("pid") || !p["pid"].is_number_integer()) {
+        return err(2, "missing or invalid `pid` param (integer, minimum 1)");
+    }
+    std::int64_t pid = p["pid"].get<std::int64_t>();
+    if (pid <= 0) {
+        return err(2, "`pid` must be a positive integer");
     }
 
     HANDLE snap = CreateToolhelp32Snapshot(
         TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32,
         static_cast<DWORD>(pid));
     if (snap == INVALID_HANDLE_VALUE) {
-        char msg[128];
-        std::snprintf(msg, sizeof(msg),
-                      "CreateToolhelp32Snapshot(pid=%lld) failed (err %lu)",
-                      static_cast<long long>(pid),
-                      static_cast<unsigned long>(GetLastError()));
-        return err(3, msg);
+        DWORD e = GetLastError();
+        return err(3, "CreateToolhelp32Snapshot(pid=" + std::to_string(pid) +
+                       ") failed (err " + std::to_string(e) + ")");
     }
 
-    std::string out = "{\"pid\":";
-    {
-        char b[32];
-        std::snprintf(b, sizeof(b), "%lld", static_cast<long long>(pid));
-        out += b;
-    }
-    out += ",\"modules\":[";
-
+    json mods = json::array();
     MODULEENTRY32W me{};
     me.dwSize = sizeof(me);
 
-    bool first = true;
     if (Module32FirstW(snap, &me)) {
         do {
-            if (!first) out += ",";
-            first = false;
-
-            std::string name = wide_to_utf8(me.szModule);
-            std::string path = wide_to_utf8(me.szExePath);
-            char base_buf[32], size_buf[32];
-            std::snprintf(base_buf, sizeof(base_buf), "%llu",
-                          reinterpret_cast<unsigned long long>(me.modBaseAddr));
-            std::snprintf(size_buf, sizeof(size_buf), "%lu",
-                          static_cast<unsigned long>(me.modBaseSize));
-
-            out += "{\"name\":\"";  json_escape_into(out, name.c_str());
-            out += "\",\"path\":\""; json_escape_into(out, path.c_str());
-            out += "\",\"base\":";  out += base_buf;
-            out += ",\"size\":";    out += size_buf;
-            out += "}";
+            mods.push_back({
+                {"name", wide_to_utf8(me.szModule)},
+                {"path", wide_to_utf8(me.szExePath)},
+                {"base", reinterpret_cast<std::uint64_t>(me.modBaseAddr)},
+                {"size", static_cast<std::uint32_t>(me.modBaseSize)},
+            });
         } while (Module32NextW(snap, &me));
     }
     CloseHandle(snap);
-    out += "]}";
-    return ok_json(out);
+
+    return ok_json({{"pid", pid}, {"modules", std::move(mods)}});
 }
 
 // -----------------------------------------------------------------------
@@ -249,7 +189,7 @@ rsm_tool_result t_cpuid(rsm_session*, const char*, void*) {
     __cpuid(r, 0x80000000);
     if (static_cast<unsigned>(r[0]) >= 0x80000004u) {
         for (unsigned i = 0; i < 3; ++i) {
-            __cpuid(r, 0x80000002 + i);
+            __cpuid(r, static_cast<int>(0x80000002u + i));
             std::memcpy(brand + i * 16 + 0,  &r[0], 4);
             std::memcpy(brand + i * 16 + 4,  &r[1], 4);
             std::memcpy(brand + i * 16 + 8,  &r[2], 4);
@@ -266,23 +206,22 @@ rsm_tool_result t_cpuid(rsm_session*, const char*, void*) {
         feat_edx = static_cast<unsigned>(r[3]);
     }
 
-    char buf[512];
-    std::snprintf(buf, sizeof(buf),
-                  "{\"vendor\":\"%s\",\"brand\":\"%s\","
-                  "\"max_leaf\":%d,"
-                  "\"features\":{\"leaf1_ecx\":%u,\"leaf1_edx\":%u,"
-                  "\"sse2\":%s,\"sse4_1\":%s,\"sse4_2\":%s,"
-                  "\"avx\":%s,\"aes\":%s,\"rdrand\":%s,\"popcnt\":%s}}",
-                  vendor, brand, max_leaf,
-                  feat_ecx, feat_edx,
-                  (feat_edx & (1u << 26)) ? "true" : "false",   // SSE2
-                  (feat_ecx & (1u << 19)) ? "true" : "false",   // SSE4.1
-                  (feat_ecx & (1u << 20)) ? "true" : "false",   // SSE4.2
-                  (feat_ecx & (1u << 28)) ? "true" : "false",   // AVX
-                  (feat_ecx & (1u << 25)) ? "true" : "false",   // AES
-                  (feat_ecx & (1u << 30)) ? "true" : "false",   // RDRAND
-                  (feat_ecx & (1u << 23)) ? "true" : "false");  // POPCNT
-    return ok_json(buf);
+    return ok_json({
+        {"vendor",   vendor},
+        {"brand",    brand},
+        {"max_leaf", max_leaf},
+        {"features", {
+            {"leaf1_ecx", feat_ecx},
+            {"leaf1_edx", feat_edx},
+            {"sse2",     (feat_edx & (1u << 26)) != 0},
+            {"sse4_1",   (feat_ecx & (1u << 19)) != 0},
+            {"sse4_2",   (feat_ecx & (1u << 20)) != 0},
+            {"avx",      (feat_ecx & (1u << 28)) != 0},
+            {"aes",      (feat_ecx & (1u << 25)) != 0},
+            {"rdrand",   (feat_ecx & (1u << 30)) != 0},
+            {"popcnt",   (feat_ecx & (1u << 23)) != 0},
+        }},
+    });
 }
 
 }  // namespace
