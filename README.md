@@ -474,9 +474,21 @@ restart the host as administrator. That way the tool still shows up in
 `tools/list` so the AI knows the capability exists, and the failure is
 diagnostic rather than mysterious.
 
+**Preferred (ABI v1.1+):** the host provides `host->is_elevated()` as of
+v1.1. Guard on the minor version and use it — no Win32 boilerplate in
+your plugin:
+
 ```cpp
-// Detect elevation at init — pure Win32, no host help needed.
-static bool host_is_elevated() {
+if (host->abi_minor >= 1 && host->is_elevated) {
+    const bool elevated = host->is_elevated() != 0;
+    // register full tools if elevated, degraded shims otherwise
+}
+```
+
+**Fallback for v1.0 hosts** (or if you want to stay self-contained):
+
+```cpp
+static bool host_is_elevated_win32() {
     HANDLE tok = nullptr;
     if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return false;
     TOKEN_ELEVATION e{};
@@ -508,6 +520,16 @@ The header declares `RSM_PLUGIN_ABI_MAJOR` and `RSM_PLUGIN_ABI_MINOR`.
 
 The `_reserved` slots in `rsm_host_api_v1` are guaranteed to be `NULL` in
 v1.0 and can be used to detect an old host at runtime if you need to.
+
+**Current ABI minor version: 1.1.** Additions since v1.0:
+
+| Field                    | Since | Notes                                                       |
+| ------------------------ | ----- | ----------------------------------------------------------- |
+| `int (*is_elevated)(void)` | 1.1 | Returns 1 if the host token is elevated (admin), else 0.  |
+
+A plugin can require v1.1 by setting `manifest.abi_minor = 1`. A plugin
+that uses no v1.1 features should keep `abi_minor = 0` so it also loads
+on older hosts.
 
 ---
 

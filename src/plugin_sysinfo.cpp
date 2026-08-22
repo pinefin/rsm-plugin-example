@@ -308,6 +308,16 @@ extern "C" RSM_PLUGIN_EXPORT int rsm_plugin_init_v1(const rsm_host_api_v1* host,
     if (!host || host->abi_major != RSM_PLUGIN_ABI_MAJOR) return 1;
     g_host = host;
 
+    // v1.1 helper is available when host->abi_minor >= 1. Log elevation
+    // status once at load so operators can see whether admin-only tools
+    // will actually work in this session.
+    if (host->abi_minor >= 1 && host->is_elevated) {
+        const int elevated = host->is_elevated();
+        host->log(ctx, RSM_LOG_INFO,
+                  elevated ? "host token is elevated (admin)"
+                           : "host token is NOT elevated");
+    }
+
     {
         rsm_tool_desc d{};
         d.name              = "plugin_sysinfo_processes";

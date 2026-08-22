@@ -33,7 +33,7 @@ extern "C" {
 //   - additive changes (new host_api slots, new manifest fields) bump minor
 //   - a v1.N plugin runs on a v1.M host as long as M >= N
 #define RSM_PLUGIN_ABI_MAJOR 1u
-#define RSM_PLUGIN_ABI_MINOR 0u
+#define RSM_PLUGIN_ABI_MINOR 1u   // v1.1: added host->is_elevated()
 
 // Opaque handles. The plugin never dereferences these.
 typedef struct rsm_plugin_ctx rsm_plugin_ctx;   // per-plugin scratch owned by host
@@ -134,6 +134,16 @@ typedef struct rsm_host_api_v1 {
     // Reserved for future v1.x additions. MUST be NULL in v1.0. Plugins
     // must not touch these unless host->abi_minor advertises support.
     void* _reserved[8];
+
+    // --- v1.1 additions --------------------------------------------------
+    // Only present when host->abi_minor >= 1. Plugins built against v1.0
+    // do not see these fields. Never call a slot below without first
+    // checking host->abi_minor.
+
+    // Returns 1 if the host process is running with an elevated (admin)
+    // token, 0 if not or if the check failed. Detect at init time and
+    // register admin-requiring tools accordingly (see README).
+    int   (*is_elevated)(void);
 } rsm_host_api_v1;
 
 // Exported symbol names the host looks up with GetProcAddress / dlsym.
