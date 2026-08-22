@@ -257,27 +257,44 @@ extern "C" RSM_PLUGIN_EXPORT int rsm_plugin_init_v1(const rsm_host_api_v1* host,
                            : "host token is NOT elevated");
     }
 
+    // Schemas are built as nlohmann::json values and dumped once per
+    // registration. The dumped std::string only needs to outlive the
+    // host->register_tool call (the host copies), so a local suffices.
+    const std::string empty_object_schema = json{
+        {"type", "object"},
+        {"properties", json::object()},
+        {"additionalProperties", false},
+    }.dump();
+
     {
         rsm_tool_desc d{};
         d.name              = "plugin_sysinfo_processes";
         d.title             = "Enumerate processes";
         d.description       = "List running processes on this machine (pid, name).";
-        d.input_schema_json =
-            "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        d.input_schema_json = empty_object_schema.c_str();
         d.safety            = RSM_SAFETY_LOCAL_PROBE;
         d.handler           = &t_processes;
         if (host->register_tool(ctx, &d) != 0) return 2;
     }
 
     {
+        const std::string modules_schema = json{
+            {"type", "object"},
+            {"properties", {
+                {"pid", {
+                    {"type", "integer"},
+                    {"minimum", 1},
+                }},
+            }},
+            {"required", json::array({"pid"})},
+            {"additionalProperties", false},
+        }.dump();
+
         rsm_tool_desc d{};
         d.name              = "plugin_sysinfo_modules";
         d.title             = "List modules for pid";
         d.description       = "List modules (DLLs) loaded in the given process. Requires local_probe.";
-        d.input_schema_json =
-            "{\"type\":\"object\","
-            "\"properties\":{\"pid\":{\"type\":\"integer\",\"minimum\":1}},"
-            "\"required\":[\"pid\"],\"additionalProperties\":false}";
+        d.input_schema_json = modules_schema.c_str();
         d.safety            = RSM_SAFETY_LOCAL_PROBE;
         d.handler           = &t_modules;
         if (host->register_tool(ctx, &d) != 0) return 3;
@@ -288,8 +305,7 @@ extern "C" RSM_PLUGIN_EXPORT int rsm_plugin_init_v1(const rsm_host_api_v1* host,
         d.name              = "plugin_sysinfo_cpuid";
         d.title             = "CPUID vendor / brand / features";
         d.description       = "Return CPU vendor string, brand string, and common feature bits.";
-        d.input_schema_json =
-            "{\"type\":\"object\",\"properties\":{},\"additionalProperties\":false}";
+        d.input_schema_json = empty_object_schema.c_str();
         d.safety            = RSM_SAFETY_SAFE;
         d.handler           = &t_cpuid;
         if (host->register_tool(ctx, &d) != 0) return 4;
