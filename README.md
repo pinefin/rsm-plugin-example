@@ -13,13 +13,15 @@ loads it:
 | `plugin_sysinfo_modules`    | `local_probe` | List modules (DLLs) loaded in a given `pid`.                     |
 | `plugin_sysinfo_cpuid`      | `safe`        | Return CPU vendor / brand string / common feature bits.          |
 
-Total plugin source: ~220 lines of C++. The one build-time dependency is
-[nlohmann/json](https://github.com/nlohmann/json), fetched automatically
-by CMake at configure time — that's what this example uses to build /
-parse the JSON payloads that cross the plugin ABI. The ABI itself is
-JSON-over-C-strings, so any JSON library (or a hand-written writer)
-works — nlohmann is just what the host already uses, so it's the path
-of least resistance.
+The plugin is intentionally structured like a real project, not a single
+demo file — so it works as a template you can copy and start deleting
+from. See [Repository layout](#repository-layout) below. The one
+build-time dependency is [nlohmann/json](https://github.com/nlohmann/json),
+fetched automatically by CMake at configure time — that's what this
+example uses to build / parse the JSON payloads that cross the plugin
+ABI. The ABI itself is JSON-over-C-strings, so any JSON library (or a
+hand-written writer) works — nlohmann is just what the host already
+uses, so it's the path of least resistance.
 
 [rsm]: https://github.com/pinefin/reversal-suite-mcp
 
@@ -28,9 +30,10 @@ of least resistance.
 ## Table of contents
 
 1. [How the plugin system works](#how-the-plugin-system-works)
-2. [Install the example](#install-the-example)
-3. [Build from source](#build-from-source)
-4. [Write your own plugin](#write-your-own-plugin)
+2. [Repository layout](#repository-layout)
+3. [Install the example](#install-the-example)
+4. [Build from source](#build-from-source)
+5. [Write your own plugin](#write-your-own-plugin)
    - [Minimum viable plugin](#minimum-viable-plugin)
    - [The public C ABI](#the-public-c-abi)
    - [Tool naming rules](#tool-naming-rules)
@@ -39,9 +42,9 @@ of least resistance.
    - [JSON I/O](#json-io)
    - [Session helpers](#session-helpers)
    - [Logging](#logging)
-5. [ABI stability contract](#abi-stability-contract)
-6. [Release process](#release-process)
-7. [License](#license)
+6. [ABI stability contract](#abi-stability-contract)
+7. [Release process](#release-process)
+8. [License](#license)
 
 ---
 
@@ -75,6 +78,51 @@ host to touch the plugins directory at all. See [the host's SAFETY.md][safety]
 for the full policy.
 
 [safety]: https://github.com/pinefin/reversal-suite-mcp/blob/main/SAFETY.md
+
+---
+
+## Repository layout
+
+```
+rsm-plugin-example/
+├── CMakeLists.txt                one target: plugin_sysinfo.dll
+├── vendor/rsm/plugin.h           vendored copy of the public ABI header
+└── src/
+    ├── plugin_entry.cpp          ABI exports (manifest, init, shutdown)
+    │                              + the table of tools to register
+    │
+    ├── common/                   plumbing every tool uses
+    │   ├── host.hpp / .cpp         stashed host-API pointer + accessor
+    │   ├── tool_result.hpp / .cpp  ok_json / err / dup_str helpers
+    │   ├── encoding.hpp / .cpp     wide_to_utf8 for Win32 wchar_t APIs
+    │   └── schema.hpp / .cpp       JSON-Schema builders for tool input
+    │
+    └── tools/                    one file per tool; each has ONE public entry
+        ├── tool_processes.hpp / .cpp   plugin_sysinfo_processes
+        ├── tool_modules.hpp / .cpp     plugin_sysinfo_modules
+        └── tool_cpuid.hpp / .cpp       plugin_sysinfo_cpuid
+```
+
+**How the pieces fit.** Each tool exposes exactly one public function of
+shape `int register_<name>_tool(const rsm_host_api_v1*, rsm_plugin_ctx*)`.
+That function builds the `rsm_tool_desc` for its tool and calls
+`host->register_tool`. `plugin_entry.cpp` keeps a `tool_row_t[]` table
+listing all of them and loops over it at init — so **adding a new tool
+is a header include and one row**, nothing else touches the entry file.
+
+**Layer discipline.** `tools/*` includes from `common/*` and never from
+another `tools/*` — tools stay independent. `common/*` includes only from
+the ABI header and each other. `plugin_entry.cpp` includes every tool's
+public header and the host accessor, and that's it. If you're grafting
+this repo into a bigger project, you can drop / rename layers without
+their internals bleeding into your ABI surface.
+
+**Sizing.** ~470 lines of C++ across 15 files. That's ~30 lines per
+file average; each tool is under 100 lines including its schema and
+descriptor. The point of the split isn't to hit some line target — it's
+that when your fifth tool grows an oddball param validator or your
+handler wants a fixture in a test, there's an obvious place for that
+code to go.
 
 ---
 
@@ -377,7 +425,7 @@ return r;
 ```
 
 `owned_free` walks the struct and calls `host->free` on each allocation —
-see `src/plugin_sysinfo.cpp` for the working implementation.
+see `src/common/tool_result.cpp` for the working implementation.
 
 **C. Plugin-owned static / pooled buffer.** If your plugin manages its own
 memory, set `r.free = NULL` and keep the buffer valid for the entire
@@ -406,9 +454,9 @@ undefined behavior on Windows.
 
 This example uses **nlohmann/json** (fetched by CMake at configure time)
 because it's what the host already uses — so the same idioms carry over
-and there's no surprise in the diff. See `src/plugin_sysinfo.cpp` for
-the pattern: build a `nlohmann::json` value, `dump()` it into a string,
-hand it off through `ok_json(...)`.
+and there's no surprise in the diff. See `src/tools/tool_processes.cpp`
+(and its two siblings) for the pattern: build a `nlohmann::json` value,
+`dump()` it into a string, hand it off through `ok_json(...)`.
 
 The ABI has no opinion on which JSON library you use — trivial
 zero-dependency plugins can hand-format JSON with `std::snprintf`; large

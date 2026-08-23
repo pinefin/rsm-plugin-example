@@ -30,11 +30,29 @@ FetchContent_Declare(nlohmann_json
 )
 FetchContent_MakeAvailable(nlohmann_json)
 
+# Sources are split across three layers:
+#   plugin_entry.cpp — the ABI-visible exports and the tool table
+#   common/*         — allocation, encoding, and schema helpers reused
+#                      by every tool
+#   tools/*          — one file per tool; each exposes a single
+#                      register_*_tool entry point
 add_library(plugin_sysinfo SHARED
-    src/plugin_sysinfo.cpp
+    src/plugin_entry.cpp
+
+    src/common/host.cpp
+    src/common/tool_result.cpp
+    src/common/encoding.cpp
+    src/common/schema.cpp
+
+    src/tools/tool_processes.cpp
+    src/tools/tool_modules.cpp
+    src/tools/tool_cpuid.cpp
 )
 
 target_include_directories(plugin_sysinfo PRIVATE
+    # `#include "common/foo.hpp"` and `#include "tools/foo.hpp"` resolve
+    # against src/; `#include "rsm/plugin.h"` resolves against vendor/.
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
     ${CMAKE_CURRENT_SOURCE_DIR}/vendor
 )
 target_link_libraries(plugin_sysinfo PRIVATE
@@ -48,6 +66,6 @@ set_target_properties(plugin_sysinfo PROPERTIES
 )
 
 if(WIN32)
-    # Use the modern process-snapshot APIs from kernel32; no extra libs needed
-    # beyond the default C++ runtime.
+    # Uses the modern process-snapshot APIs from kernel32; no extra libs
+    # needed beyond the default C++ runtime.
 endif()
